@@ -1,51 +1,280 @@
 #include "glwidget.h"
+#include "vector3d.h"
+#include "matrix4.h"
 
 #include <QPainter>
 
-#define M_PI 3.1415926535897932
-#define PHI_MIN1	0.24f
-#define PHI_MIN2	0.342f
-float	PHI_MIN	  = PHI_MIN2/*0.0f*/;
-#define PHI_MAX		0.55707f
-#define PHI1_MIN	0.0f
-#define PHI1_MAX	0.1378f
-#define GAMMA_MIN	1.9326f
-#define GAMMA_MAX	M_PI
-#define PHI_STEPS	10
-#define PHI1_STEPS	15
-#define GAMMA_STEPS 5
-#define Rb			77.83f
-#define	a			290.28f
-#define PSI			0.09467f
-#define TOP_STEPS	3
-#define N_TEETH		26
-
-#define f			83.225f
-#define ro_ao		3.096f
+using namespace vian::geom;
 
 #define Radians2Degrees(x) ((x)/M_PI*180.0f)
+#define Degrees2Radians(x) ((x)/180.0f*M_PI)
 
-typedef struct {
-        GLdouble x;
-        GLdouble y;
-        GLdouble z;
-} Vertex3D;
+#define ARRAY_DIM(x) (sizeof(x)/sizeof((x)[0]))
 
-typedef Vertex3D Vector3D;
+// common constants
+const float m = 8;
+const float beta = Degrees2Radians(16);
+const float alpha = Degrees2Radians(20);
+const float num_teeth = 20;
+const float c_star = 0.25f;
+const float ha_star = 1;
+const float b = 40;
+const float d = m * num_teeth / cosf(beta);
+const float alpha_t = atanf(tanf(alpha) / cosf(beta));
+const float Rb = d * cosf(alpha_t) / 2;
+const float ro_f = c_star * m / (1.0f - sinf(alpha_t));
+const float x = c_star + ha_star - ro_f / m;
+const float Ra = d / 2 + (ha_star + x) * m;
+const float Rf = d / 2 - (ha_star + c_star - x) * m;
+const float St = (M_PI / 2 + 2 * x * tanf(alpha)) * m / cosf(beta);
+const float phi1_max = 2 * b / d * tanf(beta);
+const float a = d / (2 * tanf(beta));
+const float alpha1 = tanf(alpha_t) - alpha_t;
+const float alpha2 = St / d;
+const float psi = alpha1 + alpha2;
 
-GLfloat Rdelta = 2.2;
+// transition surface constants
+const float alpha_tw = alpha_t;
+const float LN = Rb * tanf(alpha_tw) - ro_f;
+const float alpha_L = atanf(LN / Rb);
+const float R_L = Rb / cosf(alpha_L);
+const float phi_Lstar = sqrtf((R_L / Rb) * (R_L / Rb) - 1);
+const float psi1 = alpha_tw - phi_Lstar;
+const float psi2 = psi + psi1;
+const float f = d / 2;
+const float gamma0 = M_PI_2 + alpha_t;
+const float gamma_max = M_PI;
+
+const float max_i = 15;
+const float max_j = 10;
+
+const float max_cap_i = 5;
+const float max_trans_i = 5;
+
+// geometry data constants
+const int sideSurfaceNumPoints = (max_i + 1) * (max_j + 1);
+const int transitionSurfaceNumPoints = (max_trans_i + 1) * (max_j + 1);
+const int capSurfaceNumPoints = (max_cap_i + 1) * (max_j + 1);
+const int totalNumPoints = 2 * sideSurfaceNumPoints + 2 * transitionSurfaceNumPoints + capSurfaceNumPoints;
+
+const int sideSurfaceNumQuads = max_i * max_j;
+const int transitionSurfaceNumQuads = max_trans_i * max_j;
+const int capSurfaceNumQuads = max_cap_i * max_j;
+const int totalNumQuads = 2 * sideSurfaceNumQuads + 2 * transitionSurfaceNumQuads + capSurfaceNumQuads;
+
+static vector3d side_surface_point(int i, int j, bool isLeft)
+{
+    //float R = Rb + (Ra - Rb) * i / max_i;
+    float R = R_L + (Ra - R_L) * i / max_i;
+    float RdivRb = R / Rb;
+    float phi = sqrtf(RdivRb * RdivRb - 1);
+    float phi1 = phi1_max * j / max_j;
+
+    float lambda;
+    vector3d res;
+    if (isLeft) {
+        lambda = phi + phi1 - psi;
+        res = vector3d(Rb * (sinf(lambda) - phi * cosf(lambda)),
+                       Rb * (cosf(lambda) - phi * sinf(lambda)),
+                       -a * phi1);
+    }
+    else {
+        lambda = phi - phi1 - psi;
+        res = vector3d(-Rb * (sinf(lambda) - phi * cosf(lambda)),
+                       Rb * (cosf(lambda) - phi * sinf(lambda)),
+                       -a * phi1);
+    }
+
+    return res;
+}
+
+static vector3d side_surface_normal(int i, int j, bool isLeft)
+{
+    //float R = Rb + (Ra - Rb) * i / max_i;
+    float R = R_L + (Ra - R_L) * i / max_i;
+    float RdivRb = R / Rb;
+    float phi = sqrtf(RdivRb * RdivRb - 1);
+    float phi1 = phi1_max * j / max_j;
+
+    float lambda;
+    vector3d dV_dphi;
+    vector3d dV_dphi1;
+
+    if (isLeft) {
+        lambda = phi + phi1 - psi;
+        dV_dphi = vector3d(Rb * (cosf(lambda) + phi * sinf(lambda) - cosf(lambda)),
+                           Rb * (-sinf(lambda) - phi * cosf(lambda) - sinf(lambda)),
+                           0);
+        dV_dphi1 = vector3d(Rb * (cosf(lambda) + phi * sinf(lambda)),
+                            Rb * (-sinf(lambda) - phi * cosf(lambda)),
+                            -a);
+    }
+    else {
+        lambda = phi - phi1 - psi;
+        dV_dphi = vector3d(-Rb * (cosf(lambda) + phi * sinf(lambda - cosf(lambda))),
+                           Rb * (-sinf(lambda) - phi * cosf(lambda) - sinf(lambda)),
+                           0);
+        dV_dphi1 = vector3d(-Rb * (-cosf(lambda) - phi * sinf(lambda)),
+                            Rb * (sinf(lambda) + phi * cosf(lambda)),
+                            -a);
+    }
+
+    vector3d res = vector3d::cross(dV_dphi, dV_dphi1);
+    res.normalize();
+
+    return isLeft ? res : -res;
+}
+
+static vector3d transition_surface_point(int i, int j, bool isLeft)
+{
+    float phi1 = phi1_max * j / max_j;
+    float gamma = (gamma_max - gamma0) * i / max_trans_i;
+    float lambda2 = phi1 - psi2;
+    float lambda3 = gamma + phi1 - psi2;
+    float lambda4 = phi1 + psi2;
+    float lambda5 = gamma - phi1 - psi2;
+
+    vector3d res;
+    if (isLeft) {
+        res = vector3d(f * (sinf(lambda2) + ro_f * sinf(lambda3)),
+                       f * (cosf(lambda2) + ro_f * cosf(lambda3)),
+                       -a * phi1);
+    }
+    else {
+        res = vector3d(f * (sinf(lambda4) - ro_f * sinf(lambda5)),
+                       f * (cosf(lambda4) + ro_f * cosf(lambda5)),
+                       -a * phi1);
+    }
+
+    return res;
+}
+
+static vector3d transition_surface_normal(int i, int j, bool isLeft)
+{
+    float phi1 = phi1_max * j / max_j;
+    float gamma = (gamma_max - gamma0) * i / max_trans_i;
+    float lambda2 = phi1 - psi2;
+    float lambda3 = gamma + phi1 - psi2;
+    float lambda4 = phi1 + psi2;
+    float lambda5 = gamma - phi1 - psi2;
+
+    vector3d dV_dgamma;
+    vector3d dV_dphi1;
+    if (isLeft) {
+        dV_dgamma = vector3d(f * ro_f * cosf(lambda3),
+                             -f * ro_f * sinf(lambda3),
+                             0);
+        dV_dphi1 = vector3d(f * (cosf(lambda2) + ro_f * cosf(lambda3)),
+                            f * (-sinf(lambda2) - ro_f * sinf(lambda3)),
+                            -a);
+    }
+    else {
+        dV_dgamma = vector3d(-f * ro_f * cosf(lambda5),
+                             -f * ro_f * sinf(lambda5),
+                             0);
+        dV_dphi1 = vector3d(f * (cosf(lambda4) + ro_f * cosf(lambda5)),
+                            f * (-sinf(lambda4) + ro_f * sinf(lambda5)),
+                            -a);
+    }
+
+    vector3d res =  vector3d::cross(dV_dgamma, dV_dphi1);
+    res.normalize();
+    return res;
+}
+
+static vector3d cap_surface_point(int i, int j)
+{
+    vector3d lpoint = side_surface_point(max_i, j, true);
+    vector3d rpoint = side_surface_point(max_i, j, false);
+
+    float lphi = acosf(lpoint.x / Ra);
+    float rphi = acosf(rpoint.x / Ra);
+
+    float phi = lphi + (rphi - lphi) * i / max_cap_i;
+
+    return vector3d(Ra * cosf(phi), Ra * sinf(phi), lpoint.z);  // cylinder surface
+}
+
+static vector3d cap_surface_normal(int i, int j)
+{
+    vector3d res = cap_surface_point(i, j);
+    res.z = 0;
+
+    res.normalize();
+
+    return res;
+}
+
+static void computeSideVerticesWithNormals(GLfloat *verticesWithNormals, bool isLeft)
+{
+    GLfloat *pf = verticesWithNormals;
+    for (int i = 0; i <= max_i; ++i) {
+        for (int j = 0; j <= max_j; ++j) {
+            vector3d v = side_surface_point(i, j, isLeft);
+            vector3d n = side_surface_normal(i, j, isLeft);
+            pf[0] = v.x;
+            pf[1] = v.y;
+            pf[2] = v.z;
+            pf[3] = n.x;
+            pf[4] = n.y;
+            pf[5] = n.z;
+            pf += 6;
+        }
+    }
+}
+
+static void computeCapVerticesWithNormals(GLfloat *verticesWithNormals)
+{
+    GLfloat *pf = verticesWithNormals;
+    for (int i = 0; i <= max_cap_i; ++i) {
+        for (int j = 0; j <= max_j; ++j) {
+            vector3d v = cap_surface_point(i, j);
+            vector3d n = cap_surface_normal(i, j);
+            pf[0] = v.x;
+            pf[1] = v.y;
+            pf[2] = v.z;
+            pf[3] = n.x;
+            pf[4] = n.y;
+            pf[5] = n.z;
+            pf += 6;
+        }
+    }
+}
+
+static void computeTransitionVerticesWithNormals(GLfloat *verticesWithNormals, bool isLeft)
+{
+    GLfloat *pf = verticesWithNormals;
+    for (int i = 0; i <= max_trans_i; ++i) {
+        for (int j = 0; j <= max_j; ++j) {
+            vector3d v = transition_surface_point(i, j, isLeft);
+            vector3d n = transition_surface_normal(i, j, isLeft);
+            pf[0] = v.x;
+            pf[1] = v.y;
+            pf[2] = v.z;
+            pf[3] = n.x;
+            pf[4] = n.y;
+            pf[5] = n.z;
+            pf += 6;
+        }
+    }
+}
+
+static void computeQuadIndices(GLushort *indices, int _max_i, int _max_j, int offset = 0)
+{
+    GLushort *ind = indices;
+    for (int i = 0; i < _max_i; ++i) {
+        for (int j = 0; j < _max_j; ++j) {
+            ind[0] = (i + 0) * (_max_j + 1) + j + 0 + offset;
+            ind[1] = (i + 0) * (_max_j + 1) + j + 1 + offset;
+            ind[2] = (i + 1) * (_max_j + 1) + j + 1 + offset;
+            ind[3] = (i + 1) * (_max_j + 1) + j + 0 + offset;
+
+            ind += 4;
+        }
+    }
+}
 
 GLUquadric *quadric;
-
-GLfloat lightAmbient[]=  { 0.5f, 0.5f, 0.5f, 1.0f };	// Ambient Light Values
-GLfloat lightDiffuse[]=	 { 1.0f, 1.0f, 1.0f, 1.0f };	// Diffuse Light Values
-GLfloat lightSpecular[] = { 1.0f, 1.0f, 1.0f, 1.0f };	// Specular Light Values
-GLfloat lightPosition[]= { 0.0f, 200.0f, 500.0f, 1.0f };	// Light Position
-
-GLfloat matSpecular[] = { 1.0, 1.0, 1.0, 1.0 };
-GLfloat matDiffuse[] = { 0.0, 1.0, 0.0, 1.0 };
-GLfloat matAmbient[] = { 0.1, 0.1, 0.1, 1.0 };
-GLfloat matShininess[] = { 100.0 };
 
 int isWireframe = 1;
 int isTooth = 1;
@@ -55,16 +284,6 @@ const GLfloat identity[] = { 1, 0, 0, 0,
                              0, 1, 0, 0,
                              0, 0, 1, 0,
                              0, 0, 0, 1 };
-
-void init(void);
-void display(void);
-void reshape(int, int);
-void mouse(int, int, int, int);
-void keyboard(unsigned char, int, int);
-void arrow_keys(int, int, int);
-void drawEvolvent(int);
-void drawTransitionSurface(int);
-void pick(GLint);
 
 GLWidget::GLWidget(QWidget *parent) :
     QWidget(parent), lbut(false), rbut(false),
@@ -83,201 +302,10 @@ GLWidget::~GLWidget()
     if (context) delete context;
 }
 
-void normalize(Vector3D *v)
-{
-        float length = sqrtf(v->x*v->x + v->y*v->y + v->z*v->z);
-
-        v->x /= length;
-        v->y /= length;
-        v->z /= length;
-}
-
-Vertex3D init_vertex(float x, float y, float z)
-{
-        Vertex3D ret;
-        ret.x = x;
-        ret.y = y;
-        ret.z = z;
-
-        return ret;
-}
-
-Vector3D point_sub(Vertex3D *l, Vertex3D *r)
-{
-        Vector3D ret;
-        ret.x = l->x - r->x;
-        ret.y = l->y - r->y;
-        ret.z = l->z - r->z;
-
-        return ret;
-}
-
-Vertex3D point_add_vector(Vertex3D *l, Vector3D *r)
-{
-        Vertex3D ret;
-        ret.x = l->x + r->x;
-        ret.y = l->y + r->y;
-        ret.z = l->z + r->z;
-
-        return ret;
-}
-
-Vector3D vector_mul(Vector3D *l, float r)
-{
-        Vector3D ret;
-        ret.x = l->x * r;
-        ret.y = l->y * r;
-        ret.z = l->z * r;
-
-        return ret;
-}
-
-void transform_vertex(Vertex3D v, GLdouble m[], Vertex3D &o)
-{
-    o.x = m[0] * v.x + m[4] * v.y + m[8] * v.z + m[12];
-    o.y = m[1] * v.x + m[5] * v.y + m[9] * v.z + m[13];
-    o.z = m[2] * v.x + m[6] * v.y + m[10] * v.z + m[14];
-}
-
-#define PHI_I(i) (i) * (PHI_MAX - PHI_MIN) / PHI_STEPS + PHI_MIN
-#define PHI1_I(i) (i) * (PHI1_MAX - PHI1_MIN) / PHI1_STEPS + PHI1_MIN
-#define GAMMA_I(i) (i) * (GAMMA_MAX - GAMMA_MIN) / GAMMA_STEPS + GAMMA_MIN
-#define R_EVOL_IJ(i, j) r_evolventa(PHI_I(i), PHI1_I(j))
-#define R_EVOLN_IJ(i, j) r_evolventa_normal(PHI_I(i), PHI1_I(j))
-#define L_EVOL_IJ(i, j) l_evolventa(PHI_I(i), PHI1_I(j))
-#define L_EVOLN_IJ(i, j) l_evolventa_normal(PHI_I(i), PHI1_I(j))
-#define R_TRANS_IJ(i, j) r_transition_surface(GAMMA_I(i), PHI1_I(j))
-#define R_TRANSN_IJ(i, j) r_transition_surface_normal(GAMMA_I(i), PHI1_I(j))
-#define L_TRANS_IJ(i, j) l_transition_surface(GAMMA_I(i), PHI1_I(j))
-#define L_TRANSN_IJ(i, j) l_transition_surface_normal(GAMMA_I(i), PHI1_I(j))
-
-Vertex3D r_evolventa(float phi, float phi1)
-{
-        Vertex3D ret;
-        ret.x = Rb*((sinf(phi) - phi * cosf(phi)) * cosf(phi1) + (cosf(phi) + phi * sinf(phi)) * sinf(phi1));
-        ret.y = -Rb*((sinf(phi) - phi * cosf(phi)) * sinf(phi1) - (cosf(phi) + phi * sinf(phi)) * cosf(phi1));
-        ret.z = -a * phi1;
-
-        return ret;
-}
-
-Vertex3D l_evolventa(float phi, float phi1)
-{
-        Vertex3D ret;
-        ret.x = -Rb*((sinf(phi) - phi * cosf(phi)) * cosf(phi1) - (cosf(phi) + phi * sinf(phi)) * sinf(phi1));
-        ret.y = Rb*((sinf(phi) - phi * cosf(phi)) * sinf(phi1) + (cosf(phi) + phi * sinf(phi)) * cosf(phi1));
-        ret.z = -a * phi1;
-
-        return ret;
-}
-
-Vector3D r_evolventa_normal(float phi, float phi1)
-{
-        Vector3D ret;
-        float dxu = Rb*((cosf(phi) - cosf(phi) + phi * sinf(phi)) * cosf(phi1) + (-sinf(phi) + sinf(phi) + phi * cosf(phi)) * sinf(phi1));
-        float dxv = Rb*(-(sinf(phi) - phi * cosf(phi)) * sinf(phi1) + (cosf(phi) + phi * sinf(phi)) * cosf(phi1));
-        float dyu = -Rb*((cosf(phi) - cosf(phi) + phi * sinf(phi)) * sinf(phi1) - (-sinf(phi) + sinf(phi) + phi * cosf(phi)) * cosf(phi1));
-        float dyv = -Rb*((sinf(phi) - phi * cosf(phi)) * cosf(phi1) + (cosf(phi) + phi * sinf(phi)) * sinf(phi1));
-        float dzu = 0;
-        float dzv = -a;
-
-        ret.x = dxu * dyv - dxv * dyu;
-        ret.y = dyu * dzv - dyv * dzu;
-        ret.z = dzu * dxv - dzv * dxu;
-
-        normalize(&ret);
-
-        return ret;
-}
-
-Vector3D l_evolventa_normal(float phi, float phi1)
-{
-        Vector3D ret;
-        float dxu = -Rb*((cosf(phi) - cosf(phi) + phi * sinf(phi)) * cosf(phi1) - (-sinf(phi) + sinf(phi) + phi * cosf(phi)) * sinf(phi1));
-        float dxv = -Rb*(-(sinf(phi) - phi * cosf(phi)) * sinf(phi1) - (cosf(phi) + phi * sinf(phi)) * cosf(phi1));
-        float dyu = Rb*((cosf(phi) - cosf(phi) + phi * sinf(phi)) * sinf(phi1) + (-sinf(phi) + sinf(phi) + phi * cosf(phi)) * cosf(phi1));
-        float dyv = Rb*((sinf(phi) - phi * cosf(phi)) * cosf(phi1) - (cosf(phi) + phi * sinf(phi)) * sinf(phi1));
-        float dzu = 0;
-        float dzv = -a;
-
-        ret.x = dxu * dyv - dxv * dyu;
-        ret.y = dyu * dzv - dyv * dzu;
-        ret.z = dzu * dxv - dzv * dxu;
-
-        normalize(&ret);
-
-        return ret;
-}
-
-Vertex3D r_transition_surface(float gamma, float phi1)
-{
-        Vertex3D ret;
-        ret.x = f * sinf(phi1) + ro_ao * sinf(gamma + phi1);
-        ret.y = f * cosf(phi1) + ro_ao * cosf(gamma + phi1);
-        ret.z = -a * phi1;
-
-        return ret;
-}
-
-Vector3D r_transition_surface_normal(float gamma, float phi1) {
-        Vector3D ret;
-
-        float dxu = ro_ao * cosf(gamma + phi1);
-        float dxv = f * cosf(phi1) + ro_ao * cosf(gamma + phi1);
-        float dyu = -ro_ao * sinf(gamma + phi1);
-        float dyv = -f * sinf(phi1) - ro_ao * sinf(gamma + phi1);
-        float dzu = 0;
-        float dzv = -a;
-
-        ret.x = dxu * dyv - dxv * dyu;
-        ret.y = dyu * dzv - dyv * dzu;
-        ret.z = dzu * dxv - dzv * dxu;
-
-        normalize(&ret);
-
-        return ret;
-}
-
-Vertex3D l_transition_surface(float gamma, float phi1)
-{
-        Vertex3D ret;
-        ret.x = f * sinf(phi1) + ro_ao * sinf(-gamma + phi1);
-        ret.y = f * cosf(phi1) + ro_ao * cosf(-gamma + phi1);
-        ret.z = -a * phi1;
-
-        return ret;
-}
-
-Vector3D l_transition_surface_normal(float gamma, float phi1) {
-        Vector3D ret;
-
-        float dxu = -ro_ao * cosf(-gamma + phi1);
-        float dxv = f * cosf(phi1) + ro_ao * cosf(-gamma + phi1);
-        float dyu = ro_ao * sinf(-gamma + phi1);
-        float dyv = -f * sinf(phi1) - ro_ao * sinf(-gamma + phi1);
-        float dzu = 0;
-        float dzv = -a;
-
-        ret.x = dxu * dyv - dxv * dyu;
-        ret.y = dyu * dzv - dyv * dzu;
-        ret.z = dzu * dxv - dzv * dxu;
-
-        normalize(&ret);
-
-        return ret;
-}
-
 /* Draw axes */
-
 void GLWidget::drawAxes(void)
 {
-    /* Name-stack manipulation for the purpose of
-         selection hit processing when mouse button
-         is pressed.  Names are ignored in normal
-         OpenGL rendering mode.                    */
-
         glPushMatrix();
-        /* No name for grey sphere */
 
         glScalef(10.0f, 10.0f, 10.0f);
 
@@ -313,296 +341,18 @@ void GLWidget::drawAxes(void)
         glPopMatrix();
 }
 
-void drawEvolvent(int r)
+void GLWidget::drawTooth()
 {
-        Vertex3D v;
-        Vector3D n;
-        int i, j;
+    glEnableClientState(GL_VERTEX_ARRAY);
+    glEnableClientState(GL_NORMAL_ARRAY);
 
-        glPushName(1);
+    glVertexPointer(3, GL_FLOAT, 6 * sizeof(GLfloat), toothData);
+    glNormalPointer(GL_FLOAT, 6 * sizeof(GLfloat), toothData + 3);
 
-        if (r) {
-                glBegin(GL_QUADS);
-                for (i = 0; i < PHI_STEPS; ++i) {
-                        for (j = 0; j < PHI1_STEPS; ++j) {
-                                n = R_EVOLN_IJ(i, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_EVOL_IJ(i, j);
-                                glVertex3f(v.x, v.y, v.z);
+    glDrawElements(GL_QUADS, 4 * totalNumQuads, GL_UNSIGNED_SHORT, toothIndices);
 
-                                n = R_EVOLN_IJ(i+1, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_EVOL_IJ(i+1, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = R_EVOLN_IJ(i+1, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_EVOL_IJ(i+1, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = R_EVOLN_IJ(i, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_EVOL_IJ(i, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-                        }
-                }
-                glEnd();
-        } else {
-                glBegin(GL_QUADS);
-                for (i = 0; i < PHI_STEPS; ++i) {
-                        for (j = 0; j < PHI1_STEPS; ++j) {
-                                n = L_EVOLN_IJ(i, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_EVOL_IJ(i, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = L_EVOLN_IJ(i+1, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_EVOL_IJ(i+1, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = L_EVOLN_IJ(i+1, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_EVOL_IJ(i+1, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = L_EVOLN_IJ(i, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_EVOL_IJ(i, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-                        }
-                }
-                glEnd();
-        }
-
-        glPopName();
-}
-
-void drawTooth()
-{
-        int i, j;
-        Vertex3D vl, vr, vx;
-        Vector3D v;
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(PSI), 0.0f, 0.0f, 1.0f);
-        drawEvolvent(1);	// draw left side surface of the tooth
-        glPopMatrix();
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(-PSI), 0.0f, 0.0f, 1.0f);
-        drawEvolvent(0);	// draw right side surface of the tooth
-        glPopMatrix();
-
-        // draw tooth top surface
-        for (i = 0; i < TOP_STEPS; ++i) {
-                glBegin(GL_QUAD_STRIP);
-                for (j = 0; j <= PHI1_STEPS; ++j) {
-                        vl = l_evolventa(PHI_MAX, PHI1_I(j));
-                        vr = r_evolventa(PHI_MAX, PHI1_I(j));
-
-                        vl = init_vertex(vl.x*cosf(PSI) + vl.y*sinf(PSI), -vl.x*sinf(PSI) + vl.y*cosf(PSI), vl.z);
-                        vr = init_vertex(vr.x*cosf(PSI) - vr.y*sinf(PSI), vr.x*sinf(PSI) + vr.y*cosf(PSI), vr.z);
-
-                        v = point_sub(&vl, &vr);
-                        v = vector_mul(&v, (float)i / TOP_STEPS);
-                        vx = point_add_vector(&vr, &v);
-
-                        glNormal3f(0.0f, -1.0f, 0.0f);
-                        glVertex3f(vx.x, vx.y, vx.z);
-
-                        v = point_sub(&vl, &vr);
-                        v = vector_mul(&v, (float)(i + 1) / TOP_STEPS);
-                        vx = point_add_vector(&vr, &v);
-
-                        glNormal3f(0.0f, -1.0f, 0.0f);
-                        glVertex3f(vx.x, vx.y, vx.z);
-                }
-                glEnd();
-        }
-
-        // draw tooth front and back surfaces
-        /*
-        for (i = 0; i < TOP_STEPS; ++i) {
-                glBegin(GL_QUAD_STRIP);
-                for (j = 0; j <= PHI_STEPS; ++j) {
-                        vl = l_evolventa(PHI_I(j), PHI1_I(0));
-                        vr = r_evolventa(PHI_I(j), PHI1_I(0));
-
-                        vl = init_vertex(vl.x*cosf(PSI) + vl.y*sinf(PSI), -vl.x*sinf(PSI) + vl.y*cosf(PSI), vl.z);
-                        vr = init_vertex(vr.x*cosf(PSI) - vr.y*sinf(PSI), vr.x*sinf(PSI) + vr.y*cosf(PSI), vr.z);
-
-                        v = point_sub(&vl, &vr);
-                        v = vector_mul(&v, (float)i / TOP_STEPS);
-                        vx = point_add_vector(&vr, &v);
-
-                        glNormal3f(0.0f, 0.0f, -1.0f);
-                        glVertex3f(vx.x, vx.y, vx.z);
-
-                        v = point_sub(&vl, &vr);
-                        v = vector_mul(&v, (float)(i + 1) / TOP_STEPS);
-                        vx = point_add_vector(&vr, &v);
-
-                        glNormal3f(0.0f, 0.0f, -1.0f);
-                        glVertex3f(vx.x, vx.y, vx.z);
-                }
-                glEnd();
-        }
-
-        for (i = 0; i < TOP_STEPS; ++i) {
-                glBegin(GL_QUAD_STRIP);
-                for (j = 0; j <= PHI_STEPS; ++j) {
-                        vl = l_evolventa(PHI_I(j), PHI1_MAX);
-                        vr = r_evolventa(PHI_I(j), PHI1_MAX);
-
-                        vl = init_vertex(vl.x*cosf(PSI) + vl.y*sinf(PSI), -vl.x*sinf(PSI) + vl.y*cosf(PSI), vl.z);
-                        vr = init_vertex(vr.x*cosf(PSI) - vr.y*sinf(PSI), vr.x*sinf(PSI) + vr.y*cosf(PSI), vr.z);
-
-                        v = point_sub(&vl, &vr);
-                        v = vector_mul(&v, (float)i / TOP_STEPS);
-                        vx = point_add_vector(&vr, &v);
-
-                        glNormal3f(0.0f, 0.0f, 1.0f);
-                        glVertex3f(vx.x, vx.y, vx.z);
-
-                        v = point_sub(&vl, &vr);
-                        v = vector_mul(&v, (float)(i + 1) / TOP_STEPS);
-                        vx = point_add_vector(&vr, &v);
-
-                        glNormal3f(0.0f, 0.0f, 1.0f);
-                        glVertex3f(vx.x, vx.y, vx.z);
-                }
-                glEnd();
-        }
-        */
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(PSI + 0.024), 0.0f, 0.0f, 1.0f);
-        drawTransitionSurface(1);
-        glPopMatrix();
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(-PSI - 0.024), 0.0f, 0.0f, 1.0f);
-        drawTransitionSurface(0);
-        glPopMatrix();
-}
-
-void drawToothTriangles()
-{
-        PHI_MIN = PHI_MIN1;
-        glPushMatrix();
-        drawEvolvent(1);	// draw left side surface of the tooth
-        glPopMatrix();
-
-        PHI_MIN = PHI_MIN2;
-        glPushMatrix();
-        glRotatef(Radians2Degrees(-PSI), 0.0f, 0.0f, 1.0f);
-        drawEvolvent(0);	// draw right side surface of the tooth
-        glPopMatrix();
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(PSI), 0.0f, 0.0f, 1.0f);
-        drawEvolvent(1);	// draw left side surface of the tooth
-        glPopMatrix();
-
-        PHI_MIN = PHI_MIN1;
-        glPushMatrix();
-        drawEvolvent(0);	// draw right side surface of the tooth
-        glPopMatrix();
-
-        PHI_MIN = PHI_MIN2;
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(PSI + 0.024), 0.0f, 0.0f, 1.0f);
-        drawTransitionSurface(1);
-        glPopMatrix();
-
-        glPushMatrix();
-        glRotatef(Radians2Degrees(-PSI - 0.024), 0.0f, 0.0f, 1.0f);
-        drawTransitionSurface(0);
-        glPopMatrix();
-}
-
-void drawTransitionSurface(int r)
-{
-        Vertex3D v;
-        Vector3D n;
-        int i, j;
-
-        if (r) {
-                glBegin(GL_QUADS);
-                for (i = 0; i < GAMMA_STEPS; ++i) {
-                        for (j = 0; j < PHI1_STEPS; ++j) {
-                                n = R_TRANSN_IJ(i, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_TRANS_IJ(i, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = R_TRANSN_IJ(i+1, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_TRANS_IJ(i+1, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = R_TRANSN_IJ(i+1, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_TRANS_IJ(i+1, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = R_TRANSN_IJ(i, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = R_TRANS_IJ(i, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-                        }
-                }
-                glEnd();
-        } else {
-                glBegin(GL_QUADS);
-                for (i = 0; i < GAMMA_STEPS; ++i) {
-                        for (j = 0; j < PHI1_STEPS; ++j) {
-                                n = L_TRANSN_IJ(i, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_TRANS_IJ(i, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = L_TRANSN_IJ(i+1, j);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_TRANS_IJ(i+1, j);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = L_TRANSN_IJ(i+1, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_TRANS_IJ(i+1, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-
-                                n = L_TRANSN_IJ(i, j+1);
-                                glNormal3f(n.x, n.y, n.z);
-                                v = L_TRANS_IJ(i, j+1);
-                                glVertex3f(v.x, v.y, v.z);
-                        }
-                }
-                glEnd();
-        }
-}
-
-
-void keyboard(unsigned char key, int x, int y)  // Create Keyboard Function
-{
-        switch (key) {
-                case 27:        // When Escape Is Pressed...
-                        exit(0);   // Exit The Program
-                        break;        // Ready For Next Case
-                case 'W':
-                case 'w':
-                        isWireframe = !isWireframe;
-                        break;
-                case 'C':
-                case 'c':
-                        isTooth = !isTooth;
-                        PHI_MIN = PHI_MIN2;
-                        break;
-                default:        // Now Wrap It Up
-                        break;
-        }
+    glDisableClientState(GL_VERTEX_ARRAY);
+    glDisableClientState(GL_NORMAL_ARRAY);
 }
 
 void GLWidget::initializeGL()
@@ -623,6 +373,16 @@ void GLWidget::initializeGL()
     glEnable(GL_COLOR_MATERIAL);
     glHint(GL_PERSPECTIVE_CORRECTION_HINT, GL_NICEST);
 
+    GLfloat lightAmbient[]=  { 0.5f, 0.5f, 0.5f, 1.0f };	// Ambient Light Values
+    GLfloat lightDiffuse[]=	 { 1.0f, 1.0f, 1.0f, 1.0f };	// Diffuse Light Values
+    GLfloat lightSpecular[] = { 1.0f, 1.0f, 1.0f, 1.0f };	// Specular Light Values
+    GLfloat lightPosition[]= { 0.0f, 200.0f, 500.0f, 1.0f };	// Light Position
+
+    GLfloat matSpecular[] = { 1.0, 1.0, 1.0, 1.0 };
+    GLfloat matDiffuse[] = { 0.0, 1.0, 0.0, 1.0 };
+    GLfloat matAmbient[] = { 0.1, 0.1, 0.1, 1.0 };
+    GLfloat matShininess[] = { 100.0 };
+
     glLightfv(GL_LIGHT0, GL_AMBIENT, lightAmbient);
     glLightfv(GL_LIGHT0, GL_DIFFUSE, lightDiffuse);
     glLightfv(GL_LIGHT0, GL_SPECULAR, lightSpecular);
@@ -642,6 +402,35 @@ void GLWidget::initializeGL()
     gluQuadricTexture(quadric, GL_TRUE);		// Create Texture Coords ( NEW )
 
     memcpy(rotAccum, identity, sizeof(GLfloat) * 16);
+
+    // alloc and init tooth surface data
+    const int vertexSize = 2 * 3;
+    toothData = new GLfloat[totalNumPoints * vertexSize];
+    GLfloat *fp = toothData;
+    computeSideVerticesWithNormals(fp, true); fp += sideSurfaceNumPoints * vertexSize;
+    computeSideVerticesWithNormals(fp, false); fp += sideSurfaceNumPoints * vertexSize;
+    computeTransitionVerticesWithNormals(fp, true); fp += transitionSurfaceNumPoints * vertexSize;
+    computeTransitionVerticesWithNormals(fp, false); fp += transitionSurfaceNumPoints * vertexSize;
+    computeCapVerticesWithNormals(fp); fp = 0;
+
+    // alloc and init tooth indices
+    toothIndices = new GLushort[4 * totalNumQuads];
+
+    int offset = 0;
+    int offset2 = 0;
+    computeQuadIndices(toothIndices + offset, max_i, max_j, offset2);
+    offset += 4 * sideSurfaceNumQuads;
+    offset2 += sideSurfaceNumPoints;
+    computeQuadIndices(toothIndices + offset, max_i, max_j, offset2);
+    offset += 4 * sideSurfaceNumQuads;
+    offset2 += sideSurfaceNumPoints;
+    computeQuadIndices(toothIndices + offset, max_trans_i, max_j, offset2);
+    offset += 4 * transitionSurfaceNumQuads;
+    offset2 += transitionSurfaceNumPoints;
+    computeQuadIndices(toothIndices + offset, max_trans_i, max_j, offset2);
+    offset += 4 * transitionSurfaceNumQuads;
+    offset2 += transitionSurfaceNumPoints;
+    computeQuadIndices(toothIndices + offset, max_cap_i, max_j, offset2);
 }
 
 void GLWidget::resizeGL(int width, int height)
@@ -743,13 +532,13 @@ void GLWidget::paintGL()
             if (!pickingMode) // draw main gear cylinder
             {
                 glPushMatrix();
-                glTranslatef(0.0f, 0.0f, -a * PHI1_MAX);
+                //glTranslatef(0.0f, 0.0f, -a * PHI1_MAX);
                 if (k == 0)
                         glColor3f(0.0f, 0.0f, 1.0f);
                 else
                         glColor3f(1.0f, 1.0f, 1.0f);
 
-                gluCylinder(quadric, Rb + Rdelta, Rb + Rdelta, a * PHI1_MAX, 60, 6);
+                //gluCylinder(quadric, Rb + Rdelta, Rb + Rdelta, a * PHI1_MAX, 60, 6);
                 glPopMatrix();
             }
 
@@ -763,9 +552,9 @@ void GLWidget::paintGL()
             }
 
             if (isTooth) {
-                    for (i = 0; i < N_TEETH; ++i) {
+                    for (i = 0; i < num_teeth; ++i) {
                             glPushMatrix();
-                            glRotatef(i * 360.0f / N_TEETH, 0.0f, 0.0f, 1.0f);
+                            glRotatef(i * 360.0f / num_teeth, 0.0f, 0.0f, 1.0f);
 
                             if (pickingMode)
                                 glColor3ub(i+1, 0, 0);
@@ -781,7 +570,7 @@ void GLWidget::paintGL()
                             glPopMatrix();
                     }
             } else {
-                    drawToothTriangles();
+                    drawTooth();
             }
 
             if (k == 0) {
@@ -944,7 +733,7 @@ void GLWidget::zoomToTooth()
 
 void GLWidget::zoomTo(int toothNum)
 {
-    if (toothNum > 0 && toothNum <= N_TEETH)
+    if (toothNum > 0 && toothNum <= num_teeth)
     {
         context->makeCurrent();
 
@@ -957,40 +746,42 @@ void GLWidget::zoomTo(int toothNum)
         glRotatef(rx, 0.0f, 1.0f, 0.0f);
         glMultMatrixf(rotAccum);
 
-        glRotatef((toothNum-1) * 360.0f / N_TEETH, 0.0f, 0.0f, 1.0f);
+        glRotatef((toothNum-1) * 360.0f / num_teeth, 0.0f, 0.0f, 1.0f);
 
         // ---
 
-        glPushMatrix();
-        glRotatef(Radians2Degrees(PSI), 0.0f, 0.0f, 1.0f);
+        //glPushMatrix();
+        //glRotatef(Radians2Degrees(PSI), 0.0f, 0.0f, 1.0f);
 
         GLdouble mm1[16];
         glGetDoublev(GL_MODELVIEW_MATRIX, mm1);
 
-        glPopMatrix();
+        //glPopMatrix();
 
         // ----
 
-        glPushMatrix();
-        glRotatef(Radians2Degrees(-PSI), 0.0f, 0.0f, 1.0f);
+        //glPushMatrix();
+        //glRotatef(Radians2Degrees(-PSI), 0.0f, 0.0f, 1.0f);
 
-        GLdouble mm2[16];
-        glGetDoublev(GL_MODELVIEW_MATRIX, mm2);
+        //GLdouble mm2[16];
+        //glGetDoublev(GL_MODELVIEW_MATRIX, mm2);
 
-        glPopMatrix();
+        //glPopMatrix();
 
         // ----
-        Vertex3D v1 = R_EVOL_IJ(0, 0);
-        Vertex3D v2 = R_EVOL_IJ(0, PHI1_STEPS-1);
+        vector3d v1 = side_surface_point(0, 0, true);
+        vector3d v2 = side_surface_point(0, max_j, true);
 
-        Vertex3D v3 = L_EVOL_IJ(0, 0);
-        Vertex3D v4 = L_EVOL_IJ(0, PHI1_STEPS-1);
+        vector3d v3 = side_surface_point(0, 0, false);
+        vector3d v4 = side_surface_point(0, max_j, false);
 
-        Vertex3D v1t, v2t, v3t, v4t;
-        transform_vertex(v1, mm1, v1t);
-        transform_vertex(v2, mm1, v2t);
-        transform_vertex(v3, mm2, v3t);
-        transform_vertex(v4, mm2, v4t);
+        matrix4_t mm1_t = matrix4_t((double*)mm1);
+        //matrix4_t mm2_t = matrix4_t((double*)mm2);
+
+        vector3d v1t = v1.transform(mm1_t);
+        vector3d v2t = v2.transform(mm1_t);
+        vector3d v3t = v3.transform(mm1_t);
+        vector3d v4t = v4.transform(mm1_t);
 
         float r1 = sqrtf((v1t.x - v4t.x) * (v1t.x - v4t.x) + (v1t.y - v4t.y) * (v1t.y - v4t.y)/* + (v1t.z - v4t.z) * (v1t.z - v4t.z)*/);
         float r2 = sqrtf((v2t.x - v3t.x) * (v2t.x - v3t.x) + (v2t.y - v3t.y) * (v2t.y - v3t.y)/* + (v2t.z - v3t.z) * (v2t.z - v3t.z)*/);

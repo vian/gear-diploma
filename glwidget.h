@@ -36,6 +36,7 @@ protected:
     void paintEvent(QPaintEvent *event);
 private:
     void drawAxes();
+    void drawTooth();
     void zoomTo(int toothNum);
 
     QPoint prevPos;
@@ -51,6 +52,9 @@ private:
 
     QGLContext *context;
     QGLFramebufferObject *fbo;
+
+    GLfloat *toothData;
+    GLushort *toothIndices;
 };
 
 #endif // GLWIDGET_H
